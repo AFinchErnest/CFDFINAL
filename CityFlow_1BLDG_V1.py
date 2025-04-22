@@ -37,6 +37,20 @@ cfl_estimate = ( lidVelocity * dt )/(1.0/Nx)
 print('Problem Reynolds Number Input:', reynolds)
 print('Problem Bulk CFL Estimate:', cfl_estimate)
 
+#----------------------------------------------------------------------------
+# define inlet velocity profile 
+#-----------------------------------------------------------------------------
+def inletBC(x):
+    vals = np.zeros((3, x.shape[1]))
+    delta = domainHeight  # boundary layer thickness in Z-direction 
+    z = x[2] #x3 = height 
+    n = 0.75 # can be changed based on how we want BL curve to look like
+    vals[0] = avgWindSpeed * (z / delta)**n  # velocity increases with distance from the wall at z = 0
+    vals[1] = 0.0  # no motion in x2-direction
+    vals[2] = 0.0  # no motion in x3-direction 
+    return vals
+
+
 #Define BC types
 
 def noSlipBC(x):
