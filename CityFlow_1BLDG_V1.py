@@ -1,287 +1,366 @@
-"""A hands-on demo code for in-class active learning on implementation of
-the finite element solver for a advecton-diffusion mass transport problem
 
-Problem Description:
---------------------
-We solve for species concentration in a fluid flow comprising two rotating
-vortices inside a box. The box domain is: [0,2] X [0,1]. The flow velocity
-field is given as:
-
-    u = -pi*sin(pi*x)*cos(pi*y); v = pi*cos(pi*x)*sin(pi*y)
-
-We assume Dirichlet zero-concentration boundary condition for all walls except
-the bottom wall, where a Neumann flux q is specified for the diffusive flux
-component.
-
-Disclaimer:
------------
-Developed for computational fluid dynamics class taught at the Paul M Rady
-Department of Mechanical Engineering at the University of Colorado Boulder by
-Prof. Debanjan Mukherjee.
-
-All inquiries addressed to Prof. Mukherjee directly at debanjan@Colorado.Edu
-"""
+"""CFD city Flow Final Project"""
+""""""
 import basix
 from mpi4py import MPI
 import dolfinx as dfx
-from dolfinx.fem.petsc import LinearProblem
+from dolfinx.fem.petsc import NonlinearProblem
+from dolfinx.nls.petsc import NewtonSolver
 from dolfinx.io import gmshio
 import ufl as ufl
 import matplotlib.pyplot as plt
 import numpy as np
+from petsc4py import PETSc
 
-#---------------------------------------------------------------
-# start the problem by defining a function that programs in the
-# analytical expression for the background flow velocity field
-#---------------------------------------------------------------
-def analyticalVelocity(x):
-    vals = np.zeros((mesh.geometry.dim, x.shape[1]))
-    p = np.pi
-    vals[0] = -p * np.sin(p*x[0]) * np.cos(p*x[1])
-    vals[1] = p * np.cos(p*x[0]) * np.sin(p*x[1])
-    return vals
+#------------------------------------------------------------------------------
+# definition of problem parameters and inputs
 
-#--------------------------------------------------------------------
-# problem parameter settings:
-#----------------------------
-# 1. Enter polynomial order for FEM (pOrder)
-# 2. Enter value for constant diffusivity (Dvalue)
-# 3. Enter value for constant reaction source/sink (Rvalue)
-# 4. Enter any relevant boundary condition values
-# 5. Enter the file name to read the mesh (with boundary labels) from
-# 6. Enter the file name where the solution will be output
-# 7. Enter the file name for storing the background flow
-# 8. Enter a boolean choice variable to turn stabilization on/off
-# 9. Enter the time-step size
-# 10. Enter simulation start-time
-# 11. Enter simulation stop time
-# 12. Enter the value for theta in the theta-Galerkin method
+#------------------------------------------------------------------------------
+viscosity = 1.0
+density = 1.0
+outFileV = 'NSE-cav-V.xdmf'
+outFileP = 'NSE-cav-P.xdmf'
+reynolds = 100.0
+
+
+#------------------------------------------------------------------------------
+dt = 0.001
+t_start = 0.0
+t_end = 0.05
+t_theta = 0.5
+
+#-------------------------------------------------------------------------------
+# we will now compute two entities:
+# - first: we set up the velocity of the top wall, or lid using the Reynolds
+# number set at the beginning of the problem. this helps us parameterize the
+# simulation such that we can vary the Reynolds number and re-run cases
+#
+# - second: we compute what is an estimate of a bulk CFL number based on the
+# computed velocity of the top wall, and a bulk mesh size estimate. this does
+# not directly give us an equivalent validation of whether the classic form of
+# the CFL condition is met, but it gives us an indicator of how high/low is
+# our CFL number estimate for the system overall
+#-------------------------------------------------------------------------------
+lidVelocity = (reynolds*refLength)/viscosity
+cfl_estimate = ( lidVelocity * dt )/(1.0/Nx)
+print('Problem Reynolds Number Input:', reynolds)
+print('Problem Bulk CFL Estimate:', cfl_estimate)
+
+#-------------------------------------------------------------------------------
+# since we are not loading an external mesh with Physical Curve and Surface ids
+# marked using Gmsh - here we will have to create functions that help us mark
+# all the appropriate boundaries
+#
+# we will successively define the left, top, right, and bottom boundaries
+# of the flow domain comprising the cavity
+#-------------------------------------------------------------------------------
+def left(x):
+    return np.isclose(x[0], 0.0)
+
+def right(x):
+    return np.isclose(x[0], 1.0)
+
+def top(x):
+    return np.isclose(x[1], 1.0)
+
+def bottom(x):
+    return np.isclose(x[1], 0.0)
+
+#-------------------------------------------------------------------------------
+# we also identify the left corner of the cavity as a point of interest.
+# we will actually use this point to set up a specific condition that the
+# pressure is fixed at that point.
+# this is a special example of a Dirichlet type condition or a constraint that
+# helps set the reference/gauge for the pressure values (since in an
+# incompressible flow, the pressure is only determinable up to a constant)
+#-------------------------------------------------------------------------------
+def leftCorner(x):
+    return np.logical_and(np.isclose(x[0], 0.0), np.isclose(x[1], 0.0))
+
+#-------------------------------------------------------------------------------
+# define a function that helps set the no slip and no permeation boundary
+# conditions at the walls of the cavity
+#-------------------------------------------------------------------------------
+def noSlipBC(x):
+    return np.stack((np.zeros(x.shape[1]), np.zeros(x.shape[1])))
+
+#-------------------------------------------------------------------------------
+# define a function that helps set the no slip and no permeation boundary
+# conditions specifically at the top wall or lid of the cavity. note that
+# this is still a no slip condition - however, because the wall is moving
+# the no slip condition results in the flow velocity matching the lid velocity
+#-------------------------------------------------------------------------------
+def lidBC(x):
+    return np.stack((np.full(x.shape[1], lidVelocity), np.zeros(x.shape[1])))
+
 #---------------------------------------------------------------------
-pOrder = 1
-Dvalue = 0.01
-Rvalue = 0.0
-qvalue = 1.0
-mshFileName = 'box.msh'
-solFileName = 'dg-sol.xdmf'
-velFileName = 'dg-vel.pvd'
-isStabilize = False
-dt = 0.005
-t = 0.0
-t_end = 2.0
-theta = 0.5
+# define a function that helps set a zero-pressure boundary condition
+#---------------------------------------------------------------------
+def pressureBC(x):
+    return np.zeros(x.shape[1])
 
-#--------------------------------------------------------------------------
-# then we recall the IDs that we have used to mark the different boundary
-# facets - these must correspond to the values that have been programmed in
-# the GMSH geo file
-#--------------------------------------------------------------------------
-ID_X0 = 5 # ID for the x = 0 boundary
-ID_X1 = 7 # ID for the x = 2 boundary
-ID_Y0 = 8 # ID for the y = 0 boundary
-ID_Y1 = 6 # ID for the y = 1 boundary
+#------------------------------------------------------------------------
+# we will now create a mesh using the built-in mesh generator utilities
+# by changing the CellType in the last entry in the mesh generation call,
+# we can change this into a structured mesh. That is:
+# dfx.mesh.CellType.quadrilateral -- for structured
+#------------------------------------------------------------------------
+if meshType == 'tri':
 
-#-------------------------------------------------------------------------------
-# read the mesh from external mesh file using the built in Gmsh IO functions
-# this reads all the mesh data structures into mesh
-# then reads all the physical domain markers into cell_markers
-# (note: this corresponds to the Physical Surface tag in the Gmsh geo file)
-# then reads all the physical boundary markers into facet_markers
-# (note: this corresponds to the Physical Curve tags in the Gmsh geo file)
-#-------------------------------------------------------------------------------
-mesh, cell_markers, facet_markers = gmshio.read_from_msh(mshFileName, MPI.COMM_WORLD, gdim=2)
+    mesh = dfx.mesh.create_rectangle(MPI.COMM_WORLD, \
+        [np.array([0.0, 0.0]), np.array([1.0, 1.0])], [Nx, Ny], dfx.mesh.CellType.triangle)
 
-#--------------------------------------------------------------------
-# create a function space on the mesh for the concentration trial and
-# test function selection; we need H^1 minimum, so select pOrder >= 1
-#--------------------------------------------------------------------
-V = dfx.fem.functionspace(mesh, ("Lagrange", pOrder))
+elif meshType == 'quad':
+
+    mesh = dfx.mesh.create_rectangle(MPI.COMM_WORLD, \
+        [np.array([0.0, 0.0]), np.array([1.0, 1.0])], [Nx, Ny], dfx.mesh.CellType.quadrilateral)
 
 tdim = mesh.topology.dim
 fdim = tdim - 1
 
-#----------------------------------------------------------
-# Defining the essential/Dirichlet boundary conditions
-# Step 1: Identify the boundary faces (that is, Gamma_D)
-# Rather here we are identifying the degrees of freedom
-# located along the Gamma_D
-#----------------------------------------------------------
-b_dofs_X0 = dfx.fem.locate_dofs_topological(V, fdim, facet_markers.find(ID_X0))
-b_dofs_X1 = dfx.fem.locate_dofs_topological(V, fdim, facet_markers.find(ID_X1))
-b_dofs_Y0 = dfx.fem.locate_dofs_topological(V, fdim, facet_markers.find(ID_Y0))
-b_dofs_Y1 = dfx.fem.locate_dofs_topological(V, fdim, facet_markers.find(ID_Y1))
+#-----------------------------------------------------------------------
+# the following outlines the syntax for defining a mixed function space
+#-----------------------------------------------------------------------
+PE = basix.ufl.element('CG', mesh.basix_cell(), degree=1)
 
-#----------------------------------------------------------
-# Defining the essential/Dirichlet boundary conditions
-# Step 2: Specify the boundary value (that is, u_D)
-#----------------------------------------------------------
-uD_X0 = dfx.fem.Constant(mesh, dfx.default_scalar_type(0))
-uD_X1 = dfx.fem.Constant(mesh, dfx.default_scalar_type(0))
-uD_Y1 = dfx.fem.Constant(mesh, dfx.default_scalar_type(0))
+if elemType == 'q2p1':
+    QE = basix.ufl.element('CG', mesh.basix_cell(), degree=2, shape=(mesh.topology.dim,))
+elif elemType == 'q1p1':
+    QE = basix.ufl.element('CG', mesh.basix_cell(), degree=1, shape=(mesh.topology.dim,))
 
-#------------------------------------------------------------
-# Defining the essential/Dirichlet boundary conditions
-# Step 3: Apply the Dirichlet Condition (u = u_D at Gamma_D)
-#------------------------------------------------------------
-bc_X0 = dfx.fem.dirichletbc(uD_X0, b_dofs_X0, V)
-bc_X1 = dfx.fem.dirichletbc(uD_X1, b_dofs_X1, V)
-bc_Y1 = dfx.fem.dirichletbc(uD_Y1, b_dofs_Y1, V)
-
-#--------------------------------------------------------------------------
-# we map the background velocity as a custom expression onto the mesh
-# the steps to be followed in general are as follows:
-# (a) define a function (Python) that programs the expressions for the
-# velocity on the mesh (see analyticalVelocity defined above)
-# (b) then create a function space and a function on this space into which
-# we can interpolate the expression
-# (c) then we can interpolate the custom expression into a FEniCS function
-#--------------------------------------------------------------------------
-QE = basix.ufl.element('CG', mesh.basix_cell(), pOrder, shape=(mesh.geometry.dim,))
-W = dfx.fem.functionspace(mesh, QE)
-u0Func = dfx.fem.Function(W)
-u0Func.interpolate(lambda x: analyticalVelocity(x))
-u0Func.name = 'vel'
-
-#---------------------------------------------------------------------------
-# we will write this interpolated background velocity field onto an external
-# VTK file to perform flow visualization using an external tool
-#---------------------------------------------------------------------------
-velFile = dfx.io.VTKFile(MPI.COMM_WORLD, velFileName, "w")
-velFile.write_function([u0Func])
-velFile.close()
-
-#-------------------------------------------------------
-# define the trialfunction and the testfunction objects
-#-------------------------------------------------------
-c = ufl.TrialFunction(V)
-w = ufl.TestFunction(V)
-
-#-------------------------------------------------------------------
-# define the solutions c_n and c_n+1 - placeholders for solutions at
-# time t_n and t_n+1 respectively
-#-------------------------------------------------------------------
-c0  = dfx.fem.Function(V)
-c1  = dfx.fem.Function(V)
-
-#---------------------------------------------------------------------
-# define the diffusion contribution to the weak form and matrix system
-# evaluated now at t_n and t_n+1 respectively
-#---------------------------------------------------------------------
-D = dfx.fem.Constant(mesh, dfx.default_scalar_type(Dvalue))
-K0 = D * ufl.inner(ufl.grad(w), ufl.grad(c0)) * ufl.dx
-K1 = D * ufl.inner(ufl.grad(w), ufl.grad(c)) * ufl.dx
-
-#---------------------------------------------------------------------
-# define the advection contribution to the weak form and matrix system
-# evaluated now at t_n and t_n+1 respectively
-#---------------------------------------------------------------------
-U0 = ufl.inner(w, ufl.dot(u0Func, ufl.grad(c0))) * ufl.dx
-U1 = ufl.inner(w, ufl.dot(u0Func, ufl.grad(c))) * ufl.dx
-
-#---------------------------------------------------------------------
-# define the reaction contribution to the weak form and matrix system
-#---------------------------------------------------------------------
-R = dfx.fem.Constant(mesh, dfx.default_scalar_type(Rvalue))
-fR = w * R * ufl.dx
-
-#-------------------------------------------------------------------------------
-# extract the Neumann boundary portion for the domain
-# by extracting out all the boundary facets into the object 'ds' based on the
-# facet_marker information, we can now restrict the integral onto only the
-# portion of the boundary with id = ID_Y0 by assembling the integral over the
-# portion ds(ID_Y0)
-#-------------------------------------------------------------------------------
-ds = ufl.Measure("ds", domain=mesh, subdomain_data=facet_markers)
+ME = basix.ufl.mixed_element([QE, PE])
+W = dfx.fem.functionspace(mesh, ME)
 
 #-----------------------------------------------------------------------
-# define the Neumann BC contribution to the weak form and matrix system
+# extracting the subspace and their mapping to the mixed space is needed
+# so that boundary conditions can be appropriately assigned
 #-----------------------------------------------------------------------
-q = dfx.fem.Constant(mesh, dfx.default_scalar_type(qvalue))
-fN = w * q * ds(ID_Y0)
-
-#------------------------------------------------------------
-# Theta-Galerkin method weak form between t_n, and t_n+1
-#------------------------------------------------------------
-weakForm    = (1.0/dt) * ufl.inner(w, c) * ufl.dx - (1.0/dt) * ufl.inner(w,c0)*ufl.dx \
-            + theta * K1 + theta * U1 \
-            + (1.0 - theta) * K0 + (1.0 - theta) * U0 \
-            - fN - fR
+U_sub, U_submap = W.sub(0).collapse()
+P_sub, P_submap = W.sub(1).collapse()
 
 #-------------------------------------------------------------------------------
-# add the stabilization terms for this problem
-# uNorm below implements the computation of a norm or magnitude of the flow
-# velocity vector; h below represents a measure of the mesh element sizing
-# computed locally using a CellDiameter object; and tau below implements
-# the definition of the stabilization parameter
+# use the boundary definition functions defined previously in the code to
+# generate all the ids for the appropriate topological entities for the problem
+# - note that the overall domain (Omega) is a 2D box (dim = 2)
+# - hence the overall boundary (\delta Omega) is a set of curves (dim = 1)
+# - and the lef corner is a point (dim = 0)
+# hence we identify the curves as mesh.topology.dim - 1
+# and the point as mesh.topology.dim - 2
 #-------------------------------------------------------------------------------
-if isStabilize == True:
+ID_L = dfx.mesh.locate_entities_boundary(mesh, fdim, left)
+ID_R = dfx.mesh.locate_entities_boundary(mesh, fdim, right)
+ID_T = dfx.mesh.locate_entities_boundary(mesh, fdim, top)
+ID_B = dfx.mesh.locate_entities_boundary(mesh, fdim, bottom)
+ID_C = dfx.mesh.locate_entities_boundary(mesh, fdim-1, leftCorner)
 
-    uNorm = ufl.sqrt(ufl.inner(u0Func, u0Func))
-    h = ufl.CellDiameter(mesh)
-    tau = ( (2.0*uNorm/h)**2 + 9.0*(4.0*D/(h*h))**2 )**(-0.5)
-    residual = (1.0/dt)*(c1 - c0) + ufl.dot(u0, ufl.grad(c)) - ufl.div(D*ufl.grad(c))
-    S = tau * ufl.inner(ufl.dot(u0Func, ufl.grad(w)), residual) * ufl.dx
-    weakForm = weakForm + S
+#-------------------------------------------------------------------------------
+# syntax to extract the Gamma_D - that is degrees of freedom to be used for
+# assigning the Dirichlet boundary conditions
+#
+# recall that the no slip boundary conditions are all associated with the
+# velocity function space (W.sub(0)); while the fixed pressure condition will be
+# associated with the pressure function space (W.sub(1))
+#-------------------------------------------------------------------------------
+b_dofs_L = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_L)
+b_dofs_T = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_T)
+b_dofs_B = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_B)
+b_dofs_R = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_R)
+b_dofs_P = dfx.fem.locate_dofs_topological((W.sub(1), P_sub), fdim-1, ID_C)
 
-#-------------------------------------------------------
-# combine all the Dirichlet boundary conditions together
-#-------------------------------------------------------
-bcSet = [bc_X0, bc_X1, bc_Y1]
+#---------------------------------------------------------------------------
+# syntax for defining the 3 different uD values to be used
+# recall: u = uD for all x in Gamma_D (this is our template for implementing
+# all the Dirichlet conditions)
+#---------------------------------------------------------------------------
+uD_Wall = dfx.fem.Function(U_sub)
+uD_Wall.interpolate(noSlipBC)
 
-#-----------------------------------------------------------------
-# assembling the global matrix vector system based on the combined
-# theta-Galerkin weak form
-#-----------------------------------------------------------------
-mat = ufl.lhs(weakForm)
-vec = ufl.rhs(weakForm)
+uD_Lid = dfx.fem.Function(U_sub)
+uD_Lid.interpolate(lidBC)
 
-problem = LinearProblem(mat, vec, bcs=bcSet, u=c1, \
-    petsc_options={"ksp_type": "preonly", "pc_type": "lu", "pc_factor_mat_solver_type": "umfpack"})
+uD_P = dfx.fem.Function(P_sub)
+uD_P.interpolate(pressureBC)
+
+#--------------------------------------------------------------------------
+# we now assign the actual Dirichlet boundary conditions by identifying the
+# correct combinations of uD and Gamma_D
+#--------------------------------------------------------------------------
+bc_L = dfx.fem.dirichletbc(uD_Wall, b_dofs_L, W.sub(0))
+bc_T = dfx.fem.dirichletbc(uD_Lid, b_dofs_T, W.sub(0))
+bc_B = dfx.fem.dirichletbc(uD_Wall, b_dofs_B, W.sub(0))
+bc_R = dfx.fem.dirichletbc(uD_Wall, b_dofs_R, W.sub(0))
+bc_P = dfx.fem.dirichletbc(uD_P, b_dofs_P, W.sub(1))
+
+bc = [bc_L, bc_T, bc_B, bc_R, bc_P]
+
+#---------------------------------------------------------------------
+# define the trial and test functions based on the mixedfunctionspace
+# NOTE: the call to TrialFunctions and not TrialFunction etc.
+#---------------------------------------------------------------------
+(v,q) = ufl.TestFunctions(W)
+
+#-------------------------------------------------------------------
+# defining all physics properties and discretization constants into
+# standard dolfinx constant parameters
+#-------------------------------------------------------------------
+mu = dfx.fem.Constant(mesh, dfx.default_scalar_type(viscosity))
+rho = dfx.fem.Constant(mesh, dfx.default_scalar_type(density))
+idt = dfx.fem.Constant(mesh, dfx.default_scalar_type(1.0/dt))
+theta = dfx.fem.Constant(mesh, dfx.default_scalar_type(t_theta))
+b = dfx.fem.Constant(mesh, PETSc.ScalarType((0.0,0.0)))
+
+#-------------------------------------------------------------------------------
+# Theta-Galerkin:
+#
+# define the variational form terms without time derivative in current timestep
+# in theta-Galerkin formulation this is corresponding to the t_n+1
+#-------------------------------------------------------------------------------
+W1 = dfx.fem.Function(W)
+(u,p) = ufl.split(W1)
+
+T1_1 = rho * ufl.inner(v, ufl.grad(u)*u) * ufl.dx
+T2_1 = mu * ufl.inner(ufl.grad(v), ufl.grad(u)) * ufl.dx
+T3_1 = p * ufl.div(v) * ufl.dx
+T4_1 = q * ufl.div(u) * ufl.dx
+T5_1 = rho * ufl.dot(v,b) * ufl.dx
+L_1  = T1_1 + T2_1 - T3_1 -T4_1 - T5_1
+
+#-------------------------------------------------------------------------------
+# Theta-Galerkin:
+#
+# define the variational form terms without time derivative in previous timestep
+# in theta-Galerkin formulation this is corresponding to the t_n
+#
+# note: however, as a subtle trick, we will retain the pressure to be the same
+# as the one defined for t_n+1. this is okay to do considering the fact that
+# in reality, the pressure equation is functioning to keep the velocity
+# divergence to 0, and the divergence equation does not have a time-derivative
+#-------------------------------------------------------------------------------
+W0 = dfx.fem.Function(W)
+(u0,p0) = ufl.split(W0)
+
+T1_0 = rho * ufl.inner(v, ufl.grad(u0)*u0) * ufl.dx
+T2_0 = mu * ufl.inner(ufl.grad(v), ufl.grad(u0)) * ufl.dx
+T3_0 = p * ufl.div(v) * ufl.dx
+T4_0 = q * ufl.div(u0) * ufl.dx
+T5_0 = rho * ufl.dot(v,b) * ufl.dx
+L_0 = T1_0 + T2_0 - T3_0 -T4_0 - T5_0
+
+#--------------------------------------------------------------------------
+# Theta-Galerkin:
+#
+# combine variational forms with time derivative as discussed for the
+# complete theta-Galerkin formulation with a one-step discretization of the
+# time-derivative
+#
+#  dw/dt + L(t) = 0 is approximated as
+#  (w-w0)/dt + (1-theta)*L(t0) + theta*L(t) = 0
+#---------------------------------------------------------------------------
+F = idt * rho * ufl.inner((u-u0),v) * ufl.dx + (1.0-theta) * L_0 + theta * L_1
+
+#-------------------------------------------------------------------------------
+# defining the stabilization parameter for the Petrov-Galerkin stabilization
+#-------------------------------------------------------------------------------
+uNorm = ufl.sqrt(ufl.inner(u0, u0))
+h = ufl.CellDiameter(mesh)
+tau = ( (2.0*theta*idt)**2 + (2.0*uNorm/h)**2 + (4.0*mu/h**2)**2 )**(-0.5)
+
+#----------------------------------------------------------------------
+# defining the complete residual for the Navier-Stokes momentum balance
+#----------------------------------------------------------------------
+residual = idt*rho*(u - u0) + \
+    theta*(rho*ufl.grad(u)*u - mu*ufl.div(ufl.grad(u)) + ufl.grad(p) - rho*b) +\
+    (1.0-theta)*(rho*ufl.grad(u0)*u0 - mu*ufl.div(ufl.grad(u0)) + ufl.grad(p) - rho*b)
+
+#---------------------------------------------------------------------------
+# including now the contributions from the SUPG and PSPG stabilization terms
+# into the overall theta-Galerkin weak form
+#---------------------------------------------------------------------------
+F_SUPG = tau * ufl.inner(ufl.grad(v)*u, residual) * ufl.dx
+F_PSPG = - tau * ufl.inner(ufl.grad(q), residual) * ufl.dx
+
+F = F + F_SUPG + F_PSPG
+
+#--------------------------------------------------------------------
+# define and configure the details of a Newton Solver for the overall
+# NonlinearProblem defined in F above, set as F = 0
+#--------------------------------------------------------------------
+problem = NonlinearProblem(F, W1, bcs=bc)
+solver = NewtonSolver(MPI.COMM_WORLD, problem)
+solver.convergence_criterion = "incremental"
+solver.rtol = 1e-7
+solver.report = True
+
+ksp = solver.krylov_solver
+opts = PETSc.Options()
+option_prefix = ksp.getOptionsPrefix()
+opts[f"{option_prefix}ksp_type"] = "gmres"
+opts[f"{option_prefix}pc_type"] = "gamg"
+opts[f"{option_prefix}pc_factor_mat_solver_type"] = "umfpack"
+ksp.setFromOptions()
+
+t = t_start
+tn = 0
+
+#-------------------------------------------------------------------------------
+# set up the output files for velocity and pressure solutions
+# if you choose to write into a pvd file, multiple files - one for each time
+# step will be generated. if you choose to write into an xdmf file - only one
+# combined output file for velocity (and one for pressure) will be generated
+#-------------------------------------------------------------------------------
+if outFileV.endswith('pvd'):
+    vFile = dfx.io.VTKFile(MPI.COMM_WORLD, outFileV, "w")
+elif outFileV.endswith('xdmf'):
+    vFile = dfx.io.XDMFFile(mesh.comm, outFileV, "w", encoding=dfx.io.XDMFFile.Encoding.ASCII)
+    vFile.write_mesh(mesh)
+
+if outFileP.endswith('pvd'):
+    pFile = dfx.io.VTKFile(MPI.COMM_WORLD, outFileP, "w")
+elif outFileP.endswith('xdmf'):
+    pFile = dfx.io.XDMFFile(mesh.comm, outFileP, "w", encoding=dfx.io.XDMFFile.Encoding.ASCII)
+    pFile.write_mesh(mesh)
+
+dfx.log.set_log_level(dfx.log.LogLevel.INFO)
 
 #----------------------------------------------------------------------------
 # loop through time to solve for the updated version of the solution variable
 # it is important to note the structure of the loop as it is implemented:
 # - we identify which time step we are at
-# - we solve for the updated solution c_n+1
+# - we solve for the updated solution u_n+1, p_n+1
+# - note that the u,p update itself is an iteration (Newton method)
 # - we set c_n+1 as the c_n for the next time step
 # - we update the time step
 #
-# we will also calculate a volume averaged concentration based on the
-# computed concentration values from the simulations - and then plot it using
-# matplotlib
-#
-# lastly: we are going to use an XDMF file format - which is more efficient
-# in handling these dynamic simulation datasets (and can handle read/write of
-# mesh data in parallel)
-#----------------------------------------------------------------------------
-
-xdmfOut = dfx.io.XDMFFile(mesh.comm, "unsteady-adr.xdmf", "w", encoding=dfx.io.XDMFFile.Encoding.ASCII)
-xdmfOut.write_mesh(mesh)
-
-timeStepList = []
-concentrationAvg = []
-
+# The INNER LOOP: Newton method iteration
+# The OUTER LOOP: time step advancement
+#-----------------------------------------------------------------------------
 while t < t_end:
 
-    print('t=', t)
-    c1 = problem.solve()
-    c0.x.array[:] = c1.x.array
+    print("t=",t)
+    n, converged = solver.solve(W1)
+    assert (converged)
+    print(f"Number of iterations: {n:d}")
 
-    c1.name = 'conc'
-    xdmfOut.write_function(c1, t)
+    uf = W1.split()[0].collapse()
+    pf = W1.split()[1].collapse()
 
-    c_form = dfx.fem.form(c1 * ufl.dx)
-    c_total = dfx.fem.assemble_scalar(c_form)
-    timeStepList.append(t)
-    concentrationAvg.append(c_total)
+    uf.name = 'vel'
+    pf.name = 'pres'
+
+    if outFileV.endswith('pvd'):
+        vFile.write_function(uf, tn)
+    elif outFileV.endswith('xdmf'):
+        vFile.write_function(uf, t)
+
+    if outFileP.endswith('pvd'):
+        pFile.write_function(pf, tn)
+    elif outFileP.endswith('xdmf'):
+        pFile.write_function(pf, t)
+
+    W0.x.array[:] = W1.x.array
 
     t += dt
+    tn += 1
 
-xdmfOut.close()
-
-plt.plot(timeStepList, concentrationAvg, 'r-')
-plt.xlabel('time', fontweight='bold')
-plt.ylabel('concentration', fontweight='bold')
-plt.title('Computed Average Concentration', fontweight='bold')
-plt.savefig('conc-avg.png', dpi=120, bbox_inches='tight')
-plt.close()
-#test
+vFile.close()
+pFile.close()
