@@ -1,4 +1,3 @@
-
 """CFD city Flow Final Project"""
 """"""
 import basix
@@ -29,104 +28,38 @@ t_start = 0.0
 t_end = 0.05
 t_theta = 0.5
 
+
+#Input wind speed on given wall
+#Calculate CFL number fo reference
 #-------------------------------------------------------------------------------
-# we will now compute two entities:
-# - first: we set up the velocity of the top wall, or lid using the Reynolds
-# number set at the beginning of the problem. this helps us parameterize the
-# simulation such that we can vary the Reynolds number and re-run cases
-#
-# - second: we compute what is an estimate of a bulk CFL number based on the
-# computed velocity of the top wall, and a bulk mesh size estimate. this does
-# not directly give us an equivalent validation of whether the classic form of
-# the CFL condition is met, but it gives us an indicator of how high/low is
-# our CFL number estimate for the system overall
-#-------------------------------------------------------------------------------
-lidVelocity = (reynolds*refLength)/viscosity
+avgWindSpeed =   #(reynolds*refLength)/viscosity
 cfl_estimate = ( lidVelocity * dt )/(1.0/Nx)
 print('Problem Reynolds Number Input:', reynolds)
 print('Problem Bulk CFL Estimate:', cfl_estimate)
 
-#-------------------------------------------------------------------------------
-# since we are not loading an external mesh with Physical Curve and Surface ids
-# marked using Gmsh - here we will have to create functions that help us mark
-# all the appropriate boundaries
-#
-# we will successively define the left, top, right, and bottom boundaries
-# of the flow domain comprising the cavity
-#-------------------------------------------------------------------------------
-def left(x):
-    return np.isclose(x[0], 0.0)
+#Define BC types
 
-def right(x):
-    return np.isclose(x[0], 1.0)
-
-def top(x):
-    return np.isclose(x[1], 1.0)
-
-def bottom(x):
-    return np.isclose(x[1], 0.0)
-
-#-------------------------------------------------------------------------------
-# we also identify the left corner of the cavity as a point of interest.
-# we will actually use this point to set up a specific condition that the
-# pressure is fixed at that point.
-# this is a special example of a Dirichlet type condition or a constraint that
-# helps set the reference/gauge for the pressure values (since in an
-# incompressible flow, the pressure is only determinable up to a constant)
-#-------------------------------------------------------------------------------
-def leftCorner(x):
-    return np.logical_and(np.isclose(x[0], 0.0), np.isclose(x[1], 0.0))
-
-#-------------------------------------------------------------------------------
-# define a function that helps set the no slip and no permeation boundary
-# conditions at the walls of the cavity
-#-------------------------------------------------------------------------------
 def noSlipBC(x):
-    return np.stack((np.zeros(x.shape[1]), np.zeros(x.shape[1])))
+    return np.stack((np.zeros(x.shape[1]), np.zeros(x.shape[1]),np.zeros(x.shape[1])))
 
-#-------------------------------------------------------------------------------
-# define a function that helps set the no slip and no permeation boundary
-# conditions specifically at the top wall or lid of the cavity. note that
-# this is still a no slip condition - however, because the wall is moving
-# the no slip condition results in the flow velocity matching the lid velocity
-#-------------------------------------------------------------------------------
-def lidBC(x):
-    return np.stack((np.full(x.shape[1], lidVelocity), np.zeros(x.shape[1])))
 
-#---------------------------------------------------------------------
-# define a function that helps set a zero-pressure boundary condition
-#---------------------------------------------------------------------
-def pressureBC(x):
-    return np.zeros(x.shape[1])
+def windBC(x):
+    return np.stack((np.full(x.shape[1]), np.zeros(x.shape[1],avgWindSpeed),np.full(x.shape[1])))
 
-#------------------------------------------------------------------------
-# we will now create a mesh using the built-in mesh generator utilities
-# by changing the CellType in the last entry in the mesh generation call,
-# we can change this into a structured mesh. That is:
-# dfx.mesh.CellType.quadrilateral -- for structured
-#------------------------------------------------------------------------
-if meshType == 'tri':
+def outlet(x)
+    return np.stack((np.full(x.shape[1])))
 
-    mesh = dfx.mesh.create_rectangle(MPI.COMM_WORLD, \
-        [np.array([0.0, 0.0]), np.array([1.0, 1.0])], [Nx, Ny], dfx.mesh.CellType.triangle)
+#ID key surfaces
 
-elif meshType == 'quad':
+C_N_id = 
+C_S_id = 
+C_E_id =
+C_S_id = 
 
-    mesh = dfx.mesh.create_rectangle(MPI.COMM_WORLD, \
-        [np.array([0.0, 0.0]), np.array([1.0, 1.0])], [Nx, Ny], dfx.mesh.CellType.quadrilateral)
+B1_id = 
 
-tdim = mesh.topology.dim
-fdim = tdim - 1
 
-#-----------------------------------------------------------------------
-# the following outlines the syntax for defining a mixed function space
-#-----------------------------------------------------------------------
-PE = basix.ufl.element('CG', mesh.basix_cell(), degree=1)
-
-if elemType == 'q2p1':
-    QE = basix.ufl.element('CG', mesh.basix_cell(), degree=2, shape=(mesh.topology.dim,))
-elif elemType == 'q1p1':
-    QE = basix.ufl.element('CG', mesh.basix_cell(), degree=1, shape=(mesh.topology.dim,))
+#Establish Function Space
 
 ME = basix.ufl.mixed_element([QE, PE])
 W = dfx.fem.functionspace(mesh, ME)
@@ -135,23 +68,23 @@ W = dfx.fem.functionspace(mesh, ME)
 # extracting the subspace and their mapping to the mixed space is needed
 # so that boundary conditions can be appropriately assigned
 #-----------------------------------------------------------------------
+
 U_sub, U_submap = W.sub(0).collapse()
 P_sub, P_submap = W.sub(1).collapse()
 
 #-------------------------------------------------------------------------------
-# use the boundary definition functions defined previously in the code to
-# generate all the ids for the appropriate topological entities for the problem
-# - note that the overall domain (Omega) is a 2D box (dim = 2)
-# - hence the overall boundary (\delta Omega) is a set of curves (dim = 1)
-# - and the lef corner is a point (dim = 0)
-# hence we identify the curves as mesh.topology.dim - 1
-# and the point as mesh.topology.dim - 2
+# Assign IDS to BCs
+#We are using cardinal directions (N, S, E, W) to identify the walls. Each building is a single BC
 #-------------------------------------------------------------------------------
-ID_L = dfx.mesh.locate_entities_boundary(mesh, fdim, left)
-ID_R = dfx.mesh.locate_entities_boundary(mesh, fdim, right)
-ID_T = dfx.mesh.locate_entities_boundary(mesh, fdim, top)
-ID_B = dfx.mesh.locate_entities_boundary(mesh, fdim, bottom)
-ID_C = dfx.mesh.locate_entities_boundary(mesh, fdim-1, leftCorner)
+ID_C_N = dfx.mesh.locate_entities_boundary(mesh, fdim, left)
+ID_C_S = dfx.mesh.locate_entities_boundary(mesh, fdim, right)
+ID_C_W = dfx.mesh.locate_entities_boundary(mesh, fdim, top)
+ID_C_E = dfx.mesh.locate_entities_boundary(mesh, fdim, bottom)
+ID_C_G=dfx.mesh.locate_entities_boundary(mesh, fdim, bottom)
+ID_C_S=dfx.mesh.locate_entities_boundary(mesh, fdim, bottom)
+
+ID_B1 = dfx.mesh.locate_entities_boundary(mesh, fdim, left)
+
 
 #-------------------------------------------------------------------------------
 # syntax to extract the Gamma_D - that is degrees of freedom to be used for
@@ -161,25 +94,33 @@ ID_C = dfx.mesh.locate_entities_boundary(mesh, fdim-1, leftCorner)
 # velocity function space (W.sub(0)); while the fixed pressure condition will be
 # associated with the pressure function space (W.sub(1))
 #-------------------------------------------------------------------------------
-b_dofs_L = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_L)
-b_dofs_T = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_T)
-b_dofs_B = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_B)
-b_dofs_R = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_R)
-b_dofs_P = dfx.fem.locate_dofs_topological((W.sub(1), P_sub), fdim-1, ID_C)
+b_dofs_C_N = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_C_N)
+b_dofs_C_S = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_C_S)
+b_dofs_C_W = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_C_W)
+b_dofs_C_E = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_C_E)
+
+b_dofs_B1 = dfx.fem.locate_dofs_topological((W.sub(1), P_sub), fdim-1, ID_B1)
 
 #---------------------------------------------------------------------------
 # syntax for defining the 3 different uD values to be used
 # recall: u = uD for all x in Gamma_D (this is our template for implementing
 # all the Dirichlet conditions)
 #---------------------------------------------------------------------------
-uD_Wall = dfx.fem.Function(U_sub)
-uD_Wall.interpolate(noSlipBC)
 
-uD_Lid = dfx.fem.Function(U_sub)
-uD_Lid.interpolate(lidBC)
+#We will make the ground and building walls no slip
+uD_noSip = dfx.fem.Function(U_sub)
+uD_noSlip.interpolate(noSlipBC)
 
-uD_P = dfx.fem.Function(P_sub)
-uD_P.interpolate(pressureBC)
+#Inlet will have prescribed velocity
+uD_Inlet = dfx.fem.Function(U_sub)
+uD_Inlet.interpolate(windBC)
+
+#Outle will have zero pressure
+uD_Outlet = dfx.fem.Function(P_sub)
+uD_Outlet.interpolate(outletBC)
+
+#Remainder of surfaces will be "do nothing" BCS
+
 
 #--------------------------------------------------------------------------
 # we now assign the actual Dirichlet boundary conditions by identifying the
