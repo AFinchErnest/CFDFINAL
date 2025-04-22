@@ -60,17 +60,19 @@ def noSlipBC(x):
 def windBC(x):
     return np.stack((np.full(x.shape[1]), np.zeros(x.shape[1],avgWindSpeed),np.full(x.shape[1])))
 
-def outlet(x)
+def outlet(x):
     return np.stack((np.full(x.shape[1])))
 
 #ID key surfaces
 
-C_N_id = 
-C_S_id = 
-C_E_id =
-C_S_id = 
+C_N_id = 26
+C_S_id = 25
+C_E_id = 27
+C_W_id = 28
+C_sky_id = 29
+C_ground_id = 30
 
-B1_id = 
+B1_id = 31
 
 
 #Establish Function Space
