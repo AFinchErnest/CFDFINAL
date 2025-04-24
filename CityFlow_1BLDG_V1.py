@@ -25,44 +25,74 @@ reynolds = 100.0
 #------------------------------------------------------------------------------
 dt = 0.001
 t_start = 0.0
-t_end = 0.05
+t_end = 0.01
 t_theta = 0.5
 
 
 #Input wind speed on given wall
 #Calculate CFL number fo reference
 #-------------------------------------------------------------------------------
-avgWindSpeed =   #(reynolds*refLength)/viscosity
-cfl_estimate = ( lidVelocity * dt )/(1.0/Nx)
+avgWindSpeed =   5 #(reynolds*refLength)/viscosity
+#cfl_estimate = ( lidVelocity * dt )/(1.0/Nx)
 print('Problem Reynolds Number Input:', reynolds)
-print('Problem Bulk CFL Estimate:', cfl_estimate)
+#print('Problem Bulk CFL Estimate:', cfl_estimate)
 
 #Define BC types
+'''def inletBC(x):
+    vals = np.zeros((3, x.shape[1]))
+    delta = domainHeight  # boundary layer thickness in Z-direction 
+    z = x[2] #x3 = height 
+    n = 0.75 # can be changed based on how we want BL curve to look like
+    vals[0] = avgWindSpeed * (z / delta)**n  # velocity increases with distance from the wall at z = 0
+    vals[1] = 0.0  # no motion in x2-direction
+    vals[2] = 0.0  # no motion in x3-direction 
+    return vals'''
+
+
 
 def noSlipBC(x):
     return np.stack((np.zeros(x.shape[1]), np.zeros(x.shape[1]),np.zeros(x.shape[1])))
 
 
 def windBC(x):
-    return np.stack((np.full(x.shape[1]), np.zeros(x.shape[1],avgWindSpeed),np.full(x.shape[1])))
+    return np.stack((np.zeros(x.shape[1]), np.full(x.shape[1],avgWindSpeed),np.zeros(x.shape[1])))
 
-def outlet(x)
-    return np.stack((np.full(x.shape[1])))
+def outletBC(x):
+    return np.stack((np.zeros(x.shape[1])))
 
 #ID key surfaces
 
-C_N_id = 
-C_S_id = 
-C_E_id =
-C_S_id = 
+C_N_id = 26
+C_S_id = 25
+C_E_id =27
+C_W_id = 28
+C_G_id=30
 
-B1_id = 
+B1_N_id = 33
+B1_S_id = 31
+B1_E_id = 32
+B1_W_id = 34
+B1_Sk_id = 35
 
+#input mesh file
 
+meshName= '1BLDG_V2.msh'
+
+mesh, cell_markers, facet_markers = gmshio.read_from_msh(meshName, MPI.COMM_WORLD, gdim=3)
+
+#pull fdim and tdim from mesh
+
+tdim = mesh.topology.dim
+fdim = tdim - 1
+mesh.topology.create_connectivity(fdim, tdim)
 #Establish Function Space
+PE = basix.ufl.element('CG', mesh.basix_cell(), degree=1)
+QE = basix.ufl.element('CG', mesh.basix_cell(), degree=1, shape=(mesh.topology.dim,))
+
 
 ME = basix.ufl.mixed_element([QE, PE])
-W = dfx.fem.functionspace(mesh, ME)
+W = dfx.fem.FunctionSpace(mesh, ME)
+
 
 #-----------------------------------------------------------------------
 # extracting the subspace and their mapping to the mixed space is needed
@@ -76,16 +106,34 @@ P_sub, P_submap = W.sub(1).collapse()
 # Assign IDS to BCs
 #We are using cardinal directions (N, S, E, W) to identify the walls. Each building is a single BC
 #-------------------------------------------------------------------------------
-ID_C_N = dfx.mesh.locate_entities_boundary(mesh, fdim, left)
-ID_C_S = dfx.mesh.locate_entities_boundary(mesh, fdim, right)
-ID_C_W = dfx.mesh.locate_entities_boundary(mesh, fdim, top)
-ID_C_E = dfx.mesh.locate_entities_boundary(mesh, fdim, bottom)
-ID_C_G=dfx.mesh.locate_entities_boundary(mesh, fdim, bottom)
-ID_C_S=dfx.mesh.locate_entities_boundary(mesh, fdim, bottom)
+#b_dofs_In = dfx.fem.locate_dofs_topological((V.sub(0),U_sub), fdim, facet_markers.find(ID_In))
 
-ID_B1 = dfx.mesh.locate_entities_boundary(mesh, fdim, left)
+ID_C_N = facet_markers.find(C_N_id)
+ID_C_S = facet_markers.find(C_S_id)
+ID_C_W = facet_markers.find(C_W_id)
+ID_C_E = facet_markers.find(C_E_id)
+ID_C_G = facet_markers.find(C_G_id)
 
+ID_B1_N = facet_markers.find(B1_N_id)
+ID_B1_S = facet_markers.find(B1_S_id)
+ID_B1_W = facet_markers.find(B1_W_id)
+ID_B1_E = facet_markers.find(B1_E_id)
+ID_B1_Sk = facet_markers.find(B1_Sk_id)
 
+'''
+ID_C_N = dfx.mesh.locate_entities_boundary(mesh, fdim, C_N_id)
+ID_C_S = dfx.mesh.locate_entities_boundary(mesh, fdim, C_S_id)
+ID_C_W = dfx.mesh.locate_entities_boundary(mesh, fdim, C_W_id)
+ID_C_E = dfx.mesh.locate_entities_boundary(mesh, fdim, C_E_id)
+ID_C_G=dfx.mesh.locate_entities_boundary(mesh, fdim, C_G_id)
+#ID_C_S=dfx.mesh.locate_entities_boundary(mesh, fdim, bottom)
+
+ID_B1_N = dfx.mesh.locate_entities_boundary(mesh, fdim, B1_N_id)
+ID_B1_S = dfx.mesh.locate_entities_boundary(mesh, fdim, B1_S_id)
+ID_B1_W = dfx.mesh.locate_entities_boundary(mesh, fdim, B1_W_id)
+ID_B1_E = dfx.mesh.locate_entities_boundary(mesh, fdim, B1_E_id)
+ID_B1_Sk = dfx.mesh.locate_entities_boundary(mesh, fdim, B1_Sk_id)
+'''
 #-------------------------------------------------------------------------------
 # syntax to extract the Gamma_D - that is degrees of freedom to be used for
 # assigning the Dirichlet boundary conditions
@@ -94,12 +142,19 @@ ID_B1 = dfx.mesh.locate_entities_boundary(mesh, fdim, left)
 # velocity function space (W.sub(0)); while the fixed pressure condition will be
 # associated with the pressure function space (W.sub(1))
 #-------------------------------------------------------------------------------
+
+
 b_dofs_C_N = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_C_N)
-b_dofs_C_S = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_C_S)
+b_dofs_C_S = dfx.fem.locate_dofs_topological((W.sub(1), P_sub), fdim, ID_C_S)
 b_dofs_C_W = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_C_W)
 b_dofs_C_E = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_C_E)
+b_dofs_C_G = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_C_G)
 
-b_dofs_B1 = dfx.fem.locate_dofs_topological((W.sub(1), P_sub), fdim-1, ID_B1)
+b_dofs_B1_N = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_B1_N)
+b_dofs_B1_S = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_B1_S)
+b_dofs_B1_E = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_B1_E)
+b_dofs_B1_W = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_B1_W)
+b_dofs_B1_Sk = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_B1_Sk)
 
 #---------------------------------------------------------------------------
 # syntax for defining the 3 different uD values to be used
@@ -108,7 +163,7 @@ b_dofs_B1 = dfx.fem.locate_dofs_topological((W.sub(1), P_sub), fdim-1, ID_B1)
 #---------------------------------------------------------------------------
 
 #We will make the ground and building walls no slip
-uD_noSip = dfx.fem.Function(U_sub)
+uD_noSlip = dfx.fem.Function(U_sub)
 uD_noSlip.interpolate(noSlipBC)
 
 #Inlet will have prescribed velocity
@@ -126,14 +181,18 @@ uD_Outlet.interpolate(outletBC)
 # we now assign the actual Dirichlet boundary conditions by identifying the
 # correct combinations of uD and Gamma_D
 #--------------------------------------------------------------------------
-bc_L = dfx.fem.dirichletbc(uD_Wall, b_dofs_L, W.sub(0))
-bc_T = dfx.fem.dirichletbc(uD_Lid, b_dofs_T, W.sub(0))
-bc_B = dfx.fem.dirichletbc(uD_Wall, b_dofs_B, W.sub(0))
-bc_R = dfx.fem.dirichletbc(uD_Wall, b_dofs_R, W.sub(0))
-bc_P = dfx.fem.dirichletbc(uD_P, b_dofs_P, W.sub(1))
+bc_Inlet = dfx.fem.dirichletbc(uD_Inlet, b_dofs_C_N, W.sub(0))
+bc_Outlet = dfx.fem.dirichletbc(uD_Outlet, b_dofs_C_S, W.sub(1))
+bc_Build_N = dfx.fem.dirichletbc(uD_noSlip, b_dofs_B1_N, W.sub(0))
+bc_Build_S = dfx.fem.dirichletbc(uD_noSlip, b_dofs_B1_S, W.sub(0))
+bc_Build_E = dfx.fem.dirichletbc(uD_noSlip, b_dofs_B1_E, W.sub(0))
+bc_Build_W = dfx.fem.dirichletbc(uD_noSlip, b_dofs_B1_W, W.sub(0))
+bc_Build_Sk = dfx.fem.dirichletbc(uD_noSlip, b_dofs_B1_Sk, W.sub(0))
+bc_G = dfx.fem.dirichletbc(uD_noSlip, b_dofs_C_G, W.sub(0))
+#bc_P = dfx.fem.dirichletbc(uD_P, b_dofs_P, W.sub(1))
 
-bc = [bc_L, bc_T, bc_B, bc_R, bc_P]
-
+#bc = [bc_Inlet, bc_Outlet, bc_Build, bc_G]
+bc = [bc_Inlet, bc_Outlet, bc_Build_N, bc_Build_S, bc_Build_E, bc_Build_W, bc_Build_Sk, bc_G]
 #---------------------------------------------------------------------
 # define the trial and test functions based on the mixedfunctionspace
 # NOTE: the call to TrialFunctions and not TrialFunction etc.
@@ -148,7 +207,7 @@ mu = dfx.fem.Constant(mesh, dfx.default_scalar_type(viscosity))
 rho = dfx.fem.Constant(mesh, dfx.default_scalar_type(density))
 idt = dfx.fem.Constant(mesh, dfx.default_scalar_type(1.0/dt))
 theta = dfx.fem.Constant(mesh, dfx.default_scalar_type(t_theta))
-b = dfx.fem.Constant(mesh, PETSc.ScalarType((0.0,0.0)))
+b = dfx.fem.Constant(mesh, PETSc.ScalarType((0.0,0.0,0.0)))
 
 #-------------------------------------------------------------------------------
 # Theta-Galerkin:
