@@ -107,9 +107,13 @@ Plane Surface(10) = {11};//West
 Curve Loop(12) = {17, 18, 19, 20}; //roof
 Plane Surface(11) = {12}; //roof
 
-Physical Surface(31) = {7, 8, 9, 10, 11};
+Physical Surface(31) = {7};
+Physical Surface(32) = { 8};
+Physical Surface(33) = { 9};
+Physical Surface(34) = { 10};
+Physical Surface(35) = { 11};
 
 //City Domain
 Surface Loop(1) = {4, 5, 3, 6, 2, 1, 9, 8, 7, 10, 11};
 Volume(1) = {1};
-Physical Volume(32) = {1};
+Physical Volume(1) = {1};
