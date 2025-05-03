@@ -22,13 +22,13 @@ from petsc4py import PETSc
 #------------------------------------------------------------------------------
 viscosity = 1.0
 density = 1.0
-outFileV = 'CityFLow_V.xdmf'
-outFileP = 'CityFlow_P.xdmf'
+outFileV = 'CityFLow2d_V.xdmf'
+outFileP = 'CityFlow2d_P.xdmf'
 reynolds = 100.0
 
 
 #------------------------------------------------------------------------------
-dt = 0.001
+dt = 0.005
 t_start = 0.0
 t_end = 2.0
 t_theta = 0.5
@@ -38,7 +38,7 @@ refLength= 1.0
 #Calculate CFL number fo reference
 #-------------------------------------------------------------------------------
 #avgWindSpeed =   (reynolds*refLength)/viscosity
-avgWindSpeed =   -50
+avgWindSpeed =   20
 #cfl_estimate = ( lidVelocity * dt )/(1.0/Nx)
 print('Problem Reynolds Number Input:', reynolds)
 #print('Problem Bulk CFL Estimate:', cfl_estimate)
@@ -85,7 +85,7 @@ B1_Sk_id = 35'''
 
 #input mesh file
 
-meshName= '2BLDG_V1test.msh'
+meshName= '2BLDG_2D_V3.msh'
 
 mesh, cell_markers, facet_markers = gmshio.read_from_msh(meshName, MPI.COMM_WORLD, gdim=2)
 #checking BC facet IDS
@@ -103,7 +103,7 @@ fdim = tdim - 1
 #mesh.topology.create_connectivity(fdim, tdim)
 #Establish Function Space
 PE = basix.ufl.element('CG', mesh.basix_cell(), degree=1)
-QE = basix.ufl.element('CG', mesh.basix_cell(), degree=1, shape=(2,))
+QE = basix.ufl.element('CG', mesh.basix_cell(), degree=1, shape=(mesh.topology.dim,))
 
 
 ME = basix.ufl.mixed_element([QE, PE])
@@ -128,13 +128,15 @@ P_sub, P_submap = W.sub(1).collapse()
 ID_INLET = 103   # North
 ID_OUTLET = 101    # South
 ID_BUILDINGS = 200 # Shared group for both buildings
-
+ID_EAST = 102    # East
+ID_WEST = 104    # West
 
 # Locate degrees of freedom (DoFs) on marked facets
 b_dofs_inlet = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, facet_markers.find(ID_INLET))
 b_dofs_outlet = dfx.fem.locate_dofs_topological((W.sub(1), P_sub), fdim, facet_markers.find(ID_OUTLET))
 b_dofs_buildings = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, facet_markers.find(ID_BUILDINGS))
-
+b_dofs_East = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, facet_markers.find(ID_EAST))
+b_dofs_West = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, facet_markers.find(ID_WEST))
 ''''
 b_dofs_B1_S = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_B1_S)
 b_dofs_B1_E = dfx.fem.locate_dofs_topological((W.sub(0), U_sub), fdim, ID_B1_E)
@@ -173,8 +175,11 @@ print("Outlet pressure BC norm (should be 0):", np.linalg.norm(uD_Outlet.x.array
 bc_inlet = dfx.fem.dirichletbc(uD_Inlet, b_dofs_inlet, W.sub(0))
 bc_outlet = dfx.fem.dirichletbc(uD_Outlet, b_dofs_outlet, W.sub(1))
 bc_buildings = dfx.fem.dirichletbc(uD_noSlip, b_dofs_buildings, W.sub(0))
+bc_EAST=dfx.fem.dirichletbc(uD_noSlip, b_dofs_East, W.sub(0))
+bc_WEST=dfx.fem.dirichletbc(uD_noSlip, b_dofs_West, W.sub(0))
 
-bc = [bc_inlet, bc_outlet, bc_buildings]
+
+bc = [bc_inlet, bc_outlet, bc_buildings,bc_EAST, bc_WEST]
 
 #---------------------------------------------------------------------
 # define the trial and test functions based on the mixedfunctionspace
